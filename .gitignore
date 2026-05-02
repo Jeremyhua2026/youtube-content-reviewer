@@ -1,0 +1,26 @@
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+
+# Local data (personal)
+context_data.json
+library_data.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.Python
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
