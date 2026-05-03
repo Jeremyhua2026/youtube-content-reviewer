@@ -7,7 +7,13 @@ services:
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: GOOGLE_API_KEY
-        sync: false   # set this manually in the Render dashboard, do NOT commit
+        sync: false   # set manually in the Render dashboard
+      # Webshare residential proxy — required because YouTube blocks cloud IPs
+      # Sign up free at https://www.webshare.io/ then paste creds in dashboard
+      - key: WEBSHARE_PROXY_USERNAME
+        sync: false
+      - key: WEBSHARE_PROXY_PASSWORD
+        sync: false
       - key: PYTHON_VERSION
         value: "3.11"
     healthCheckPath: /health

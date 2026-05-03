@@ -1,10 +1,28 @@
 import json
+import os
 import re
 import urllib.request
 import urllib.parse as _urlparse
 from urllib.parse import urlparse, parse_qs
 
 from youtube_transcript_api import YouTubeTranscriptApi
+
+# Optional residential proxy (needed when running on cloud hosts like Render —
+# YouTube blocks most cloud-provider IPs from transcript endpoints).
+# If WEBSHARE_PROXY_USERNAME and WEBSHARE_PROXY_PASSWORD env vars are set,
+# we route through Webshare's residential pool. Otherwise we go direct.
+_PROXY_CONFIG = None
+try:
+    from youtube_transcript_api.proxies import WebshareProxyConfig, GenericProxyConfig
+    _ws_user = os.environ.get("WEBSHARE_PROXY_USERNAME", "").strip()
+    _ws_pass = os.environ.get("WEBSHARE_PROXY_PASSWORD", "").strip()
+    _http_proxy = os.environ.get("HTTP_PROXY_URL", "").strip()
+    if _ws_user and _ws_pass:
+        _PROXY_CONFIG = WebshareProxyConfig(proxy_username=_ws_user, proxy_password=_ws_pass)
+    elif _http_proxy:
+        _PROXY_CONFIG = GenericProxyConfig(http_url=_http_proxy, https_url=_http_proxy)
+except Exception:
+    _PROXY_CONFIG = None
 from youtube_transcript_api._errors import (
     TranscriptsDisabled,
     NoTranscriptFound,
@@ -59,10 +77,10 @@ def fetch_transcript(url_or_id: str) -> dict:
     try:
         # youtube-transcript-api >= 1.0 uses an instance .fetch() method.
         # Older versions exposed a class method .get_transcript().
-        if hasattr(YouTubeTranscriptApi, "get_transcript"):
+        if hasattr(YouTubeTranscriptApi, "get_transcript") and _PROXY_CONFIG is None:
             entries = YouTubeTranscriptApi.get_transcript(video_id)
         else:
-            api = YouTubeTranscriptApi()
+            api = YouTubeTranscriptApi(proxy_config=_PROXY_CONFIG) if _PROXY_CONFIG else YouTubeTranscriptApi()
             fetched = api.fetch(video_id)
             # FetchedTranscript is iterable of FetchedTranscriptSnippet (has .text)
             entries = list(fetched)
