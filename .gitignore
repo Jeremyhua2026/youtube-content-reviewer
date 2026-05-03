@@ -3,7 +3,7 @@
 .env.local
 .env.*.local
 
-# Local data (personal)
+# Local data (legacy — now lives in browser localStorage)
 context_data.json
 library_data.json
 

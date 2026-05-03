@@ -347,16 +347,175 @@
 </div>
 
 <script>
-// When opened via file:// the page has no http origin, so relative URLs like
-// "/analyze" can't be resolved. Fall back to a local API base in that case.
-const API_BASE = (location.protocol === "http:" || location.protocol === "https:")
-  ? ""
-  : "http://localhost:8000";
+// ============================================================
+// All persistence is in localStorage — backend is just /analyze.
+// ============================================================
+const LS_CONTEXT = "yta_context";
+const LS_LIBRARY = "yta_library_v1";
+
+// API base — relative when served from same origin, absolute fallback for file:// dev.
+// Override at runtime by setting window.YTA_API_BASE before this script runs (or via a meta tag).
+const API_BASE =
+  (typeof window !== "undefined" && window.YTA_API_BASE) ||
+  ((document.querySelector('meta[name="yta-api-base"]') || {}).content) ||
+  ((location.protocol === "http:" || location.protocol === "https:") ? "" : "http://localhost:8000");
 const api = (path) => API_BASE + path;
 
 const $ = (id) => document.getElementById(id);
+const escapeHtml = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+}[c]));
 
-// Tabs
+// --- localStorage helpers ---
+function loadLibraryRaw() {
+  try {
+    const raw = localStorage.getItem(LS_LIBRARY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+function saveLibraryRaw(arr) {
+  localStorage.setItem(LS_LIBRARY, JSON.stringify(arr));
+}
+function getContext() {
+  return localStorage.getItem(LS_CONTEXT) || "";
+}
+function setContext(text) {
+  localStorage.setItem(LS_CONTEXT, text || "");
+}
+
+function upsertVideo(analysis) {
+  const arr = loadLibraryRaw();
+  const now = Math.floor(Date.now() / 1000);
+  const idx = arr.findIndex(v => v.video_id === analysis.video_id);
+  const analysisBlock = {
+    summary: analysis.summary || "",
+    creator_notes: analysis.creator_notes || "",
+    key_insights: analysis.key_insights || [],
+    personal_relevance: analysis.personal_relevance || "",
+    delivery_script: analysis.delivery_script || {},
+  };
+  if (idx >= 0) {
+    arr[idx] = {
+      ...arr[idx],
+      title: analysis.video_title || arr[idx].title,
+      creator: analysis.video_creator || arr[idx].creator,
+      thumbnail: analysis.video_thumbnail || arr[idx].thumbnail,
+      analysis: analysisBlock,
+      updated_at: now,
+    };
+  } else {
+    arr.push({
+      video_id: analysis.video_id,
+      title: analysis.video_title || "",
+      creator: analysis.video_creator || "",
+      thumbnail: analysis.video_thumbnail || "",
+      analysis: analysisBlock,
+      rating: null,
+      notes: "",
+      tags: (analysis.suggested_tags || []).map(t => String(t).toLowerCase()),
+      created_at: now,
+      updated_at: now,
+    });
+  }
+  saveLibraryRaw(arr);
+  return arr.find(v => v.video_id === analysis.video_id);
+}
+
+function patchVideo(videoId, patch) {
+  const arr = loadLibraryRaw();
+  const v = arr.find(x => x.video_id === videoId);
+  if (!v) return null;
+  if (patch.rating !== undefined) {
+    let r = parseFloat(patch.rating);
+    if (isNaN(r)) r = null; else r = Math.max(0, Math.min(10, r));
+    v.rating = r;
+  }
+  if (patch.notes !== undefined) v.notes = String(patch.notes || "");
+  if (patch.tags !== undefined) {
+    const seen = new Set();
+    v.tags = (patch.tags || []).map(t => String(t).trim().toLowerCase().replace(/\s+/g, "-"))
+      .filter(t => t && !seen.has(t) && (seen.add(t), true));
+  }
+  v.updated_at = Math.floor(Date.now() / 1000);
+  saveLibraryRaw(arr);
+  return v;
+}
+
+function deleteVideo(videoId) {
+  const arr = loadLibraryRaw();
+  const next = arr.filter(v => v.video_id !== videoId);
+  saveLibraryRaw(next);
+  return next.length !== arr.length;
+}
+
+function filteredLibrary({sort = "rating", q = "", tag = ""} = {}) {
+  let arr = loadLibraryRaw();
+  if (q) {
+    const ql = q.toLowerCase().trim();
+    arr = arr.filter(v => {
+      const a = v.analysis || {};
+      const haystack = [
+        v.title, v.creator, v.notes, (v.tags || []).join(" "),
+        a.summary, a.creator_notes, a.personal_relevance,
+        (a.key_insights || []).join(" "),
+      ].join(" ").toLowerCase();
+      return haystack.includes(ql);
+    });
+  }
+  if (tag) {
+    const tl = tag.toLowerCase();
+    arr = arr.filter(v => (v.tags || []).map(t => t.toLowerCase()).includes(tl));
+  }
+  if (sort === "rating") {
+    arr.sort((a, b) => (b.rating || 0) - (a.rating || 0) || (b.updated_at || 0) - (a.updated_at || 0));
+  } else if (sort === "recent") {
+    arr.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+  } else if (sort === "creator") {
+    arr.sort((a, b) => (a.creator || "").toLowerCase().localeCompare((b.creator || "").toLowerCase()));
+  }
+  return arr;
+}
+
+function libraryStats() {
+  const arr = loadLibraryRaw();
+  const rated = arr.filter(v => v.rating != null && v.rating > 0);
+  const avg = rated.length ? Math.round((rated.reduce((s, v) => s + v.rating, 0) / rated.length) * 10) / 10 : null;
+  const top = rated.reduce((best, v) => (!best || v.rating > best.rating) ? v : best, null);
+  const creators = {};
+  const tags = {};
+  arr.forEach(v => {
+    if (v.creator) creators[v.creator] = (creators[v.creator] || 0) + 1;
+    (v.tags || []).forEach(t => { tags[t] = (tags[t] || 0) + 1; });
+  });
+  const topCreator = Object.entries(creators).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+  const topTag = Object.entries(tags).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+  return {
+    total: arr.length,
+    rated_count: rated.length,
+    avg_rating: avg,
+    top_video: top ? {title: top.title, video_id: top.video_id, rating: top.rating} : null,
+    top_creator: topCreator,
+    top_tag: topTag,
+    all_tags: Object.keys(tags).sort((a, b) => tags[b] - tags[a]),
+  };
+}
+
+function libraryHighlights(limit = 6) {
+  const arr = loadLibraryRaw().slice().sort((a, b) => (b.rating || 0) - (a.rating || 0));
+  const out = [];
+  for (const v of arr) {
+    const insights = (v.analysis || {}).key_insights || [];
+    for (const ins of insights.slice(0, 2)) {
+      out.push({insight: ins, video_id: v.video_id, title: v.title, creator: v.creator, rating: v.rating});
+      if (out.length >= limit) return out;
+    }
+  }
+  return out;
+}
+
+// --- Tabs ---
 document.querySelectorAll(".tab").forEach(t => {
   t.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
@@ -370,43 +529,19 @@ document.querySelectorAll(".tab").forEach(t => {
   });
 });
 
-async function loadContext() {
-  try {
-    const r = await fetch(api("/context"));
-    if (!r.ok) throw new Error("Failed to load context");
-    const data = await r.json();
-    $("ctxBox").value = data.context || "";
-  } catch (e) {
-    $("ctxError").textContent = e.message;
-    $("ctxError").classList.remove("hidden");
-  }
+// --- Context (localStorage) ---
+function loadContext() {
+  $("ctxBox").value = getContext();
+  $("ctxError").classList.add("hidden");
 }
 
-$("saveBtn").addEventListener("click", async () => {
-  $("saveBtn").disabled = true;
-  $("saveStatus").textContent = "";
-  $("ctxError").classList.add("hidden");
-  try {
-    const r = await fetch(api("/context"), {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({context: $("ctxBox").value})
-    });
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({detail: "Save failed"}));
-      throw new Error(err.detail || "Save failed");
-    }
-    $("saveStatus").textContent = "Saved ✓";
-    setTimeout(() => { $("saveStatus").textContent = ""; }, 2200);
-  } catch (e) {
-    $("ctxError").textContent = e.message;
-    $("ctxError").classList.remove("hidden");
-  } finally {
-    $("saveBtn").disabled = false;
-  }
+$("saveBtn").addEventListener("click", () => {
+  setContext($("ctxBox").value);
+  $("saveStatus").textContent = "Saved ✓";
+  setTimeout(() => { $("saveStatus").textContent = ""; }, 2200);
 });
 
-// Length selector
+// --- Length selector ---
 let scriptLength = "tight";
 document.querySelectorAll(".seg-btn").forEach(b => {
   b.addEventListener("click", () => {
@@ -416,7 +551,7 @@ document.querySelectorAll(".seg-btn").forEach(b => {
   });
 });
 
-// Analyze
+// --- Analyze ---
 $("analyzeBtn").addEventListener("click", runAnalyze);
 $("url").addEventListener("keydown", (e) => { if (e.key === "Enter") runAnalyze(); });
 
@@ -431,13 +566,18 @@ async function runAnalyze() {
     const r = await fetch(api("/analyze"), {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({url, length: scriptLength})
+      body: JSON.stringify({url, length: scriptLength, context: getContext()}),
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({detail: "Analyze failed"}));
       throw new Error(err.detail || "Analyze failed");
     }
     const data = await r.json();
+    // Save fresh analysis into localStorage (preserves any prior rating/notes/tags)
+    const stored = upsertVideo(data);
+    data.rating = stored.rating;
+    data.notes = stored.notes;
+    data.tags = stored.tags;
     renderResults(data);
   } catch (e) {
     $("analyzeError").textContent = e.message;
@@ -467,7 +607,6 @@ function renderResults(d) {
   $("s-cta").textContent = s.call_to_action || "";
   $("s-note").textContent = s.note || "";
 
-  // Video metadata banner
   const meta = $("videoMeta");
   if (d.video_id) {
     const thumb = d.video_thumbnail || `https://i.ytimg.com/vi/${d.video_id}/hqdefault.jpg`;
@@ -481,46 +620,36 @@ function renderResults(d) {
   }
   $("results").classList.remove("hidden");
 
-  // Rating + notes + tags
-  const rating = (d.rating === null || d.rating === undefined) ? 0 : Number(d.rating);
+  const rating = (d.rating == null) ? 0 : Number(d.rating);
   $("rateSlider").value = rating;
   $("rateValue").textContent = rating > 0 ? rating.toFixed(1) : "—";
   $("notesBox").value = d.notes || "";
   $("tagsInput").value = (d.tags && d.tags.length ? d.tags : (d.suggested_tags || [])).join(", ");
 
-  // Stash latest data for TTS + saves
   window.__lastResult = d;
   window.__currentVideoId = d.video_id || null;
 }
 
-// --- Rating + notes auto-save ---
+// --- Rating + notes + tags auto-save to localStorage ---
 let saveTimer = null;
 function queueSave() {
   if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveRatingAndNotes, 600);
+  saveTimer = setTimeout(saveRatingAndNotes, 400);
 }
-async function saveRatingAndNotes() {
+function saveRatingAndNotes() {
   const vid = window.__currentVideoId;
   if (!vid) return;
   const tags = $("tagsInput").value
     .split(",").map(s => s.trim().toLowerCase().replace(/\s+/g, "-")).filter(Boolean);
-  const payload = {
+  const updated = patchVideo(vid, {
     rating: parseFloat($("rateSlider").value),
     notes: $("notesBox").value,
     tags,
-  };
-  $("notesStatus").textContent = "Saving…";
-  try {
-    const r = await fetch(api(`/library/${vid}`), {
-      method: "PATCH",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(payload),
-    });
-    if (!r.ok) throw new Error("Save failed");
+  });
+  if (updated) {
+    window.__lastResult = {...window.__lastResult, rating: updated.rating, notes: updated.notes, tags: updated.tags};
     $("notesStatus").textContent = "Saved ✓";
-    setTimeout(() => { $("notesStatus").textContent = ""; }, 1600);
-  } catch (e) {
-    $("notesStatus").textContent = "⚠ " + e.message;
+    setTimeout(() => { $("notesStatus").textContent = ""; }, 1300);
   }
 }
 $("rateSlider").addEventListener("input", () => {
@@ -541,7 +670,6 @@ $("exportBtn").addEventListener("click", async () => {
     $("exportBtn").textContent = "✓ Copied";
     setTimeout(() => { $("exportBtn").textContent = "📋 Copy as Markdown"; }, 1800);
   } catch (e) {
-    // Fallback: open a textarea-like prompt
     window.prompt("Copy markdown:", md);
   }
 });
@@ -550,8 +678,7 @@ function buildMarkdown(d) {
   const s = d.delivery_script || {};
   const tags = (d.tags || []).map(t => `#${t}`).join(" ");
   const url = d.video_id ? `https://www.youtube.com/watch?v=${d.video_id}` : "";
-  const ratingStr = (d.rating !== null && d.rating !== undefined && d.rating > 0)
-    ? `${Number(d.rating).toFixed(1)}/10` : "unrated";
+  const ratingStr = (d.rating != null && d.rating > 0) ? `${Number(d.rating).toFixed(1)}/10` : "unrated";
   const lines = [];
   lines.push(`# ${d.video_title || "Untitled"}`);
   if (d.video_creator) lines.push(`*by ${d.video_creator}* · **${ratingStr}**`);
@@ -579,7 +706,7 @@ function buildMarkdown(d) {
   return lines.join("\n");
 }
 
-// --- Library tab ---
+// --- Library tab (localStorage) ---
 let librarySort = "rating";
 let librarySearch = "";
 let libraryTag = "";
@@ -599,54 +726,27 @@ $("libSearch").addEventListener("input", () => {
   searchDebounce = setTimeout(() => {
     librarySearch = $("libSearch").value;
     loadLibrary();
-  }, 200);
+  }, 150);
 });
 
-async function loadLibrary() {
-  await Promise.all([loadStats(), loadHighlights(), loadLibraryList()]);
+function loadLibrary() {
+  renderStats();
+  renderHighlights();
+  renderLibraryList();
 }
 
-async function loadLibraryList() {
-  const list = $("libList");
-  list.innerHTML = "";
-  try {
-    const params = new URLSearchParams({sort: librarySort});
-    if (librarySearch) params.set("q", librarySearch);
-    if (libraryTag) params.set("tag", libraryTag);
-    const r = await fetch(api(`/library?${params.toString()}`));
-    if (!r.ok) throw new Error("Failed to load library");
-    const data = await r.json();
-    const videos = data.videos || [];
-    if (videos.length === 0) {
-      $("libEmpty").classList.remove("hidden");
-      $("libEmpty").textContent = (librarySearch || libraryTag)
-        ? "No videos match your filters."
-        : "No videos yet. Analyze one to get started.";
-      return;
-    }
-    $("libEmpty").classList.add("hidden");
-    videos.forEach(v => list.appendChild(renderLibItem(v)));
-  } catch (e) {
-    list.innerHTML = `<div class="error">${e.message}</div>`;
-  }
-}
-
-async function loadStats() {
-  try {
-    const r = await fetch(api("/library/stats"));
-    if (!r.ok) return;
-    const s = await r.json();
-    const panel = $("statsPanel");
-    if (!s.total) { panel.classList.add("hidden"); return; }
-    panel.classList.remove("hidden");
-    panel.innerHTML = `
-      <div class="stat"><div class="stat-label">Videos</div><div class="stat-value">${s.total}</div><div class="stat-sub">${s.rated_count} rated</div></div>
-      <div class="stat"><div class="stat-label">Avg rating</div><div class="stat-value">${s.avg_rating !== null ? s.avg_rating : "—"}</div><div class="stat-sub">across rated</div></div>
-      <div class="stat"><div class="stat-label">Top creator</div><div class="stat-value" style="font-size: 14px;">${escapeHtml(s.top_creator || "—")}</div><div class="stat-sub">most analyzed</div></div>
-      <div class="stat"><div class="stat-label">Top tag</div><div class="stat-value" style="font-size: 14px;">${s.top_tag ? "#" + escapeHtml(s.top_tag) : "—"}</div><div class="stat-sub">most used</div></div>
-    `;
-    renderTagFilters(s.all_tags || []);
-  } catch (e) { /* ignore */ }
+function renderStats() {
+  const s = libraryStats();
+  const panel = $("statsPanel");
+  if (!s.total) { panel.classList.add("hidden"); return; }
+  panel.classList.remove("hidden");
+  panel.innerHTML = `
+    <div class="stat"><div class="stat-label">Videos</div><div class="stat-value">${s.total}</div><div class="stat-sub">${s.rated_count} rated</div></div>
+    <div class="stat"><div class="stat-label">Avg rating</div><div class="stat-value">${s.avg_rating != null ? s.avg_rating : "—"}</div><div class="stat-sub">across rated</div></div>
+    <div class="stat"><div class="stat-label">Top creator</div><div class="stat-value" style="font-size: 14px;">${escapeHtml(s.top_creator || "—")}</div><div class="stat-sub">most analyzed</div></div>
+    <div class="stat"><div class="stat-label">Top tag</div><div class="stat-value" style="font-size: 14px;">${s.top_tag ? "#" + escapeHtml(s.top_tag) : "—"}</div><div class="stat-sub">most used</div></div>
+  `;
+  renderTagFilters(s.all_tags || []);
 }
 
 function renderTagFilters(tags) {
@@ -667,53 +767,57 @@ function renderTagFilters(tags) {
   });
 }
 
-async function loadHighlights() {
-  try {
-    const r = await fetch(api("/library/highlights?limit=6"));
-    if (!r.ok) return;
-    const data = await r.json();
-    const items = data.highlights || [];
-    const panel = $("highlightsPanel");
-    if (!items.length) { panel.classList.add("hidden"); return; }
-    panel.classList.remove("hidden");
-    const list = $("highlightsList");
-    list.innerHTML = "";
-    items.forEach(h => {
-      const row = document.createElement("div");
-      row.className = "hl-item";
-      const ratingStr = (h.rating !== null && h.rating !== undefined && h.rating > 0) ? `${Number(h.rating).toFixed(1)}` : "—";
-      row.innerHTML = `
-        <div>
-          <div class="hl-text"></div>
-          <div class="hl-source"></div>
-        </div>
-        <div class="hl-rating">${ratingStr}</div>
-      `;
-      row.querySelector(".hl-text").textContent = h.insight;
-      row.querySelector(".hl-source").textContent = `from "${h.title}" · ${h.creator || "unknown"}`;
-      list.appendChild(row);
-    });
-  } catch (e) { /* ignore */ }
+function renderHighlights() {
+  const items = libraryHighlights(6);
+  const panel = $("highlightsPanel");
+  if (!items.length) { panel.classList.add("hidden"); return; }
+  panel.classList.remove("hidden");
+  const list = $("highlightsList");
+  list.innerHTML = "";
+  items.forEach(h => {
+    const row = document.createElement("div");
+    row.className = "hl-item";
+    const ratingStr = (h.rating != null && h.rating > 0) ? `${Number(h.rating).toFixed(1)}` : "—";
+    row.innerHTML = `
+      <div>
+        <div class="hl-text"></div>
+        <div class="hl-source"></div>
+      </div>
+      <div class="hl-rating">${ratingStr}</div>
+    `;
+    row.querySelector(".hl-text").textContent = h.insight;
+    row.querySelector(".hl-source").textContent = `from "${h.title}" · ${h.creator || "unknown"}`;
+    list.appendChild(row);
+  });
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-  }[c]));
+function renderLibraryList() {
+  const list = $("libList");
+  list.innerHTML = "";
+  const videos = filteredLibrary({sort: librarySort, q: librarySearch, tag: libraryTag});
+  if (!videos.length) {
+    $("libEmpty").classList.remove("hidden");
+    $("libEmpty").textContent = (librarySearch || libraryTag)
+      ? "No videos match your filters."
+      : "No videos yet. Analyze one to get started.";
+    return;
+  }
+  $("libEmpty").classList.add("hidden");
+  videos.forEach(v => list.appendChild(renderLibItem(v)));
 }
 
 function renderLibItem(v) {
   const item = document.createElement("div");
   item.className = "lib-item";
   const thumb = v.thumbnail || `https://i.ytimg.com/vi/${v.video_id}/hqdefault.jpg`;
-  const ratingHTML = (v.rating !== null && v.rating !== undefined && v.rating > 0)
+  const ratingHTML = (v.rating != null && v.rating > 0)
     ? `<div class="lib-rating">${Number(v.rating).toFixed(1)}</div>`
     : `<div class="lib-rating unrated">unrated</div>`;
   const tagsHTML = (v.tags && v.tags.length)
     ? `<div class="lib-tags">${v.tags.map(t => `<span class="lib-tag">#${escapeHtml(t)}</span>`).join("")}</div>`
     : "";
   item.innerHTML = `
-    <img src="${thumb}" alt="" />
+    <img src="${escapeHtml(thumb)}" alt="" />
     <div>
       <div class="lib-title"></div>
       <div class="lib-creator"></div>
@@ -728,19 +832,16 @@ function renderLibItem(v) {
 }
 
 function openLibDetail(v, anchor) {
-  // Toggle expansion
   const next = anchor.nextSibling;
   if (next && next.classList && next.classList.contains("lib-detail")) {
     next.remove();
     return;
   }
-  // Close other open details
   document.querySelectorAll(".lib-detail").forEach(d => d.remove());
 
   const det = document.createElement("div");
   det.className = "lib-detail";
   const a = v.analysis || {};
-  const s = a.delivery_script || {};
   det.innerHTML = `
     <h4>Summary</h4>
     <div class="lib-summary"></div>
@@ -766,26 +867,18 @@ function openLibDetail(v, anchor) {
   const rateValEl = det.querySelector(".lib-rate-value");
   const statusEl = det.querySelector(".lib-save-status");
   notesEl.value = v.notes || "";
-  const r = (v.rating === null || v.rating === undefined) ? 0 : Number(v.rating);
+  const r = (v.rating == null) ? 0 : Number(v.rating);
   rateEl.value = r;
   rateValEl.textContent = r > 0 ? r.toFixed(1) : "—";
 
   let t = null;
   const queue = () => {
     if (t) clearTimeout(t);
-    t = setTimeout(async () => {
-      statusEl.textContent = "Saving…";
-      try {
-        const resp = await fetch(api(`/library/${v.video_id}`), {
-          method: "PATCH",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({rating: parseFloat(rateEl.value), notes: notesEl.value}),
-        });
-        if (!resp.ok) throw new Error("save failed");
-        statusEl.textContent = "Saved ✓";
-        setTimeout(() => { statusEl.textContent = ""; }, 1500);
-      } catch (e) { statusEl.textContent = "⚠"; }
-    }, 600);
+    t = setTimeout(() => {
+      patchVideo(v.video_id, {rating: parseFloat(rateEl.value), notes: notesEl.value});
+      statusEl.textContent = "Saved ✓";
+      setTimeout(() => { statusEl.textContent = ""; }, 1200);
+    }, 400);
   };
   rateEl.addEventListener("input", () => {
     const val = parseFloat(rateEl.value);
@@ -795,7 +888,6 @@ function openLibDetail(v, anchor) {
   notesEl.addEventListener("input", queue);
 
   det.querySelector(".lib-load").addEventListener("click", () => {
-    // Switch to analyze tab and render this entry
     document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
     document.querySelector('.tab[data-tab="analyze"]').classList.add("active");
     $("tab-analyze").classList.remove("hidden");
@@ -809,31 +901,26 @@ function openLibDetail(v, anchor) {
       video_thumbnail: v.thumbnail,
       rating: parseFloat(rateEl.value),
       notes: notesEl.value,
+      tags: v.tags || [],
     });
     window.scrollTo({top: 0, behavior: "smooth"});
   });
 
-  det.querySelector(".lib-delete").addEventListener("click", async () => {
+  det.querySelector(".lib-delete").addEventListener("click", () => {
     if (!confirm("Delete this video from your library?")) return;
-    try {
-      const resp = await fetch(api(`/library/${v.video_id}`), {method: "DELETE"});
-      if (!resp.ok) throw new Error("delete failed");
-      loadLibrary();
-    } catch (e) { alert(e.message); }
+    deleteVideo(v.video_id);
+    loadLibrary();
   });
 
   anchor.parentNode.insertBefore(det, anchor.nextSibling);
 }
 
-// --- Text-to-speech (browser SpeechSynthesis API, free) ---
-let currentUtterance = null;
+// --- Text-to-speech (browser SpeechSynthesis API) ---
 let currentBtn = null;
 
 function stopSpeaking() {
-  if (currentBtn) currentBtn.classList.remove("playing");
-  if (currentBtn) currentBtn.textContent = "🔊 Listen";
+  if (currentBtn) { currentBtn.classList.remove("playing"); currentBtn.textContent = "🔊 Listen"; }
   currentBtn = null;
-  currentUtterance = null;
   if ("speechSynthesis" in window) window.speechSynthesis.cancel();
 }
 
@@ -842,24 +929,18 @@ function speak(text, btn) {
     alert("Your browser doesn't support speech synthesis.");
     return;
   }
-  // Toggle off if same button is currently playing
   if (currentBtn === btn) { stopSpeaking(); return; }
   stopSpeaking();
   if (!text || !text.trim()) return;
-
   const utt = new SpeechSynthesisUtterance(text);
   utt.rate = 1.0;
   utt.pitch = 1.0;
-  // Pick a reasonable English voice if available
   const voices = window.speechSynthesis.getVoices();
   const preferred = voices.find(v => /en[-_](US|GB|AU)/i.test(v.lang) && /(Samantha|Daniel|Karen|Google|Microsoft)/i.test(v.name))
                  || voices.find(v => /^en/i.test(v.lang));
   if (preferred) utt.voice = preferred;
-
   utt.onend = stopSpeaking;
   utt.onerror = stopSpeaking;
-
-  currentUtterance = utt;
   currentBtn = btn;
   btn.classList.add("playing");
   btn.textContent = "⏹ Stop";
@@ -867,9 +948,7 @@ function speak(text, btn) {
 }
 
 function buildScriptText(s) {
-  return [
-    s.hook, s.context, s.core_idea, s.personal_tie, s.call_to_action
-  ].filter(Boolean).join("  ");
+  return [s.hook, s.context, s.core_idea, s.personal_tie, s.call_to_action].filter(Boolean).join("  ");
 }
 
 document.addEventListener("click", (e) => {
@@ -883,14 +962,13 @@ document.addEventListener("click", (e) => {
   speak(text, btn);
 });
 
-// Some browsers populate voices async — trigger a load
 if ("speechSynthesis" in window) {
   window.speechSynthesis.onvoiceschanged = () => {};
   window.speechSynthesis.getVoices();
 }
 window.addEventListener("beforeunload", stopSpeaking);
 
-// Preload context grid so it's ready
+// Initial load
 loadContext();
 </script>
 </body>

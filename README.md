@@ -61,12 +61,12 @@ youtube-analyzer/
 
 ## API endpoints
 
-| Method | Path        | Description                                                        |
-|--------|-------------|--------------------------------------------------------------------|
-| GET    | `/health`   | Health check                                                       |
-| GET    | `/context`  | Returns the stored personal context                                |
-| POST   | `/context`  | Update one category `{category, value}` or many `{values: {...}}`  |
-| POST   | `/analyze`  | Body: `{url}` — returns summary, insights, relevance, script       |
+| Method | Path        | Description                                                                          |
+|--------|-------------|--------------------------------------------------------------------------------------|
+| GET    | `/health`   | Health check                                                                         |
+| POST   | `/analyze`  | Body: `{url, length, context}` — returns the full analysis. Stateless (no DB).       |
+
+The personal context, library of analyzed videos, ratings, notes, and tags all live in the visitor's browser (`localStorage`). Each visitor has their own private library — nothing is stored on the server. This makes the app safe to host publicly.
 
 ### Example: analyze a video
 
